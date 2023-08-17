@@ -412,16 +412,55 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
         })
     }
 
-    /// EVM create opcode for both initial crate and CREATE and CREATE2 opcodes.
-    fn create_inner(&mut self, inputs: &CreateInputs) -> CreateResult {
-        let res = self.prepare_create(inputs);
+    fn create_end(
+        &mut self,
+        inputs: &CreateInputs,
+        ret: InstructionResult,
+        address: Option<B160>,
+        gas: Gas,
+        out: Bytes,
+    ) -> (InstructionResult, Option<B160>, Gas, Bytes) {
+        if INSPECT {
+            self.inspector
+                .create_end(&mut self.data, inputs, ret, address, gas, out)
+        } else {
+            (ret, address, gas, out)
+        }
+    }
 
-        let prepared_create = match res {
-            Ok(o) => o,
-            Err(e) => return e,
+    /// "Precheck" the create operation by running it through the inspector.
+    /// If unsound, the inspector will return a result immediately and not proceed.
+    fn create_precheck(&mut self, inputs: &mut CreateInputs) -> CreateResult {
+        if INSPECT {
+            let (ret, address, gas, out) = self.inspector.create(&mut self.data, inputs);
+            if ret != InstructionResult::Continue {
+                let res = self
+                    .inspector
+                    .create_end(&mut self.data, inputs, ret, address, gas, out);
+                return CreateResult {
+                    result: res.0,
+                    created_address: res.1,
+                    gas: res.2,
+                    return_value: res.3,
+                };
+            }
+        }
+        return CreateResult {
+            result: InstructionResult::Continue,
+            created_address: None,
+            gas: Gas::new(inputs.gas_limit),
+            return_value: Bytes::new(),
         };
+    }
 
-        // Create new interpreter and execute initcode
+    /// EVM create opcode for both initial crate and CREATE and CREATE2 opcodes.
+    fn create_inner(&mut self, inputs: &mut CreateInputs) -> CreateResult {
+        // Prepare all the data for executing the create operation.
+        // If the create operation is invalid, return the error as a CreateResult.
+        let prepared_create = match self.prepare_create(inputs) {
+            Ok(prepared) => prepared,
+            Err(res) => return res,
+        };
         let (exit_reason, mut interpreter) =
             self.run_interpreter(prepared_create.contract, prepared_create.gas.limit(), false);
 
@@ -654,45 +693,83 @@ impl<'a, GSPEC: Spec, DB: Database, const INSPECT: bool> EVMImpl<'a, GSPEC, DB, 
         })
     }
 
-    /// Main contract call of the EVM.
-    fn call_inner(&mut self, inputs: &CallInputs) -> CallResult {
-        let res = self.prepare_call(inputs);
+    /// "Precheck" the call, to see if it's valid or if it should halt immediately.
+    fn precheck_call(&mut self, inputs: &mut CallInputs) -> CallResult {
+        if INSPECT {
+            let (ret, gas, out) = self.inspector.call(&mut self.data, inputs);
+            if ret != InstructionResult::Continue {
+                let res = self
+                    .inspector
+                    .call_end(&mut self.data, inputs, gas, ret, out);
+                return CallResult {
+                    result: res.0,
+                    gas: res.1,
+                    return_value: res.2,
+                };
+            }
+        }
 
-        let prepared_call = match res {
-            Ok(o) => o,
-            Err(e) => return e,
+        CallResult {
+            result: InstructionResult::Continue,
+            gas: Gas::new(inputs.gas_limit),
+            return_value: Bytes::new(),
+        }
+    }
+
+    fn call_end(
+        &mut self,
+        inputs: &mut CallInputs,
+        gas: Gas,
+        ret: InstructionResult,
+        out: Bytes,
+    ) -> CallResult {
+        if INSPECT {
+            let res = self
+                .inspector
+                .call_end(&mut self.data, inputs, gas, ret, out);
+            return CallResult {
+                result: res.0,
+                gas: res.1,
+                return_value: res.2,
+            };
+        } else {
+            return CallResult {
+                result: ret,
+                gas,
+                return_value: out,
+            };
+        }
+    }
+
+    /// Main contract call of the EVM.
+    fn call_inner(&mut self, inputs: &mut CallInputs) -> CallResult {
+        let prepared_call = match self.prepare_call(inputs) {
+            Ok(call) => call,
+            Err(res) => return res,
         };
 
         let ret = if is_precompile(inputs.contract, self.data.precompiles.len()) {
             self.call_precompile(inputs, prepared_call.gas)
-        } else if !prepared_call.contract.bytecode.is_empty() {
-            // Create interpreter and execute subcall
+        } else {
             let (exit_reason, interpreter) = self.run_interpreter(
                 prepared_call.contract,
                 prepared_call.gas.limit(),
                 inputs.is_static,
             );
+            if matches!(exit_reason, return_ok!()) {
+                self.data.journaled_state.checkpoint_commit();
+            } else {
+                self.data
+                    .journaled_state
+                    .checkpoint_revert(prepared_call.checkpoint);
+            }
+
             CallResult {
                 result: exit_reason,
                 gas: interpreter.gas,
                 return_value: interpreter.return_value(),
             }
-        } else {
-            CallResult {
-                result: InstructionResult::Stop,
-                gas: prepared_call.gas,
-                return_value: Bytes::new(),
-            }
         };
-
-        // revert changes or not.
-        if matches!(ret.result, return_ok!()) {
-            self.data.journaled_state.checkpoint_commit();
-        } else {
-            self.data
-                .journaled_state
-                .checkpoint_revert(prepared_call.checkpoint);
-        }
 
         ret
     }
@@ -826,46 +903,28 @@ impl<'a, GSPEC: Spec, DB: Database + 'a, const INSPECT: bool> Host
         &mut self,
         inputs: &mut CreateInputs,
     ) -> (InstructionResult, Option<B160>, Gas, Bytes) {
-        // Call inspector
-        if INSPECT {
-            let (ret, address, gas, out) = self.inspector.create(&mut self.data, inputs);
-            if ret != InstructionResult::Continue {
-                return (ret, address, gas, out);
-            }
+        let precheck = self.create_precheck(inputs);
+        if precheck.result != InstructionResult::Continue {
+            return (precheck.result, None, precheck.gas, precheck.return_value);
         }
-        let ret = self.create_inner(inputs);
-        if INSPECT {
-            self.inspector.create_end(
-                &mut self.data,
-                inputs,
-                ret.result,
-                ret.created_address,
-                ret.gas,
-                ret.return_value,
-            )
-        } else {
-            (ret.result, ret.created_address, ret.gas, ret.return_value)
-        }
+        let res = self.create_inner(inputs);
+        let res = self.create_end(
+            inputs,
+            res.result,
+            res.created_address,
+            res.gas,
+            res.return_value,
+        );
+        return (res.0, res.1, res.2, res.3);
     }
 
     fn call(&mut self, inputs: &mut CallInputs) -> (InstructionResult, Gas, Bytes) {
-        if INSPECT {
-            let (ret, gas, out) = self.inspector.call(&mut self.data, inputs);
-            if ret != InstructionResult::Continue {
-                return (ret, gas, out);
-            }
+        let precheck = self.precheck_call(inputs);
+        if precheck.result != InstructionResult::Continue {
+            return (precheck.result, precheck.gas, precheck.return_value);
         }
-        let ret = self.call_inner(inputs);
-        if INSPECT {
-            self.inspector.call_end(
-                &mut self.data,
-                inputs,
-                ret.gas,
-                ret.result,
-                ret.return_value,
-            )
-        } else {
-            (ret.result, ret.gas, ret.return_value)
-        }
+        let res = self.call_inner(inputs);
+        let res = self.call_end(inputs, res.gas, res.result, res.return_value);
+        return (res.result, res.gas, res.return_value);
     }
 }
