@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [7.0.2](https://github.com/Evalir/revm/compare/revme-v7.0.1...revme-v7.0.2) - 2025-06-26
+
+### Other
+
+- statetest runner cleanup ([#2665](https://github.com/Evalir/revm/pull/2665))
+- use TxEnv::builder ([#2652](https://github.com/Evalir/revm/pull/2652))
+
 ## [7.0.1](https://github.com/bluealloy/revm/compare/revme-v7.0.0...revme-v7.0.1) - 2025-06-20
 
 ### Other

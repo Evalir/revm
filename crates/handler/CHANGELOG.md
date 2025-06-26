@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [8.0.0](https://github.com/Evalir/revm/compare/revm-handler-v7.0.1...revm-handler-v8.0.0) - 2025-06-26
+
+### Added
+
+- optional_eip3541 ([#2661](https://github.com/Evalir/revm/pull/2661))
+
+### Other
+
+- use TxEnv::builder ([#2652](https://github.com/Evalir/revm/pull/2652))
+- fix copy-pasted inner doc comments ([#2663](https://github.com/Evalir/revm/pull/2663))
+
 ## [7.0.1](https://github.com/bluealloy/revm/compare/revm-handler-v7.0.0...revm-handler-v7.0.1) - 2025-06-20
 
 ### Fixed
